@@ -1,11 +1,11 @@
 <!--
   APIM inbound/outbound policy for the Okta-protected MCP→Snowflake gateway.
 
-  Front:  Okta OAuth2/OIDC JWT (Auth Code + PKCE, obtained by Claude Desktop)
-          -- in Pattern B the caller is the AGENT SERVICE presenting an OBO token
-             (minted on behalf of the end user; aud=api://mcp-snowflake,
-             scope=snowflake.query). Either way this policy validates the same
-             audience/scope, so no change is needed between patterns.
+  Front:  Okta OAuth2/OIDC JWT (Auth Code + PKCE, obtained by Claude Desktop).
+          In Pattern B the caller is the AGENT SERVICE presenting an OBO token
+          (minted on behalf of the end user; aud=api://mcp-snowflake,
+          scope=snowflake.query). Either way this policy validates the same
+          audience/scope, so no change is needed between patterns.
   Back:   MCP server (Streamable HTTP) exposing Snowflake tools
   Side:   Per-user telemetry to Application Insights
 
