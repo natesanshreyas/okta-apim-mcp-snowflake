@@ -1,23 +1,27 @@
-# APIM setup — add the MCP API to your EXISTING APIM instance
+# APIM setup — add the Agent + MCP APIs to your EXISTING APIM instance
 
-This POC does **not** provision a new APIM. It adds a new API + policy onto an
-APIM instance you already run, so APIM becomes the centralized security and
-governance gateway for the MCP/Snowflake capability.
+This POC does **not** provision a new APIM. It adds **two** new APIs + policies onto
+an APIM instance you already run, so APIM becomes the centralized security and
+governance gateway for Pattern B (the Azure model is the agent).
 
 What gets added:
 
-- A new API (path suffix `mcp-snowflake`) imported from [`openapi.yaml`](openapi.yaml).
-- Named values: `OKTA_ISSUER`, `OKTA_AUDIENCE`, `OKTA_JWKS_URI`, `MCP_BACKEND_URL`.
-- The inbound/outbound policy [`policy/mcp-snowflake.xml`](policy/mcp-snowflake.xml)
-  that validates the Okta JWT, rate-limits per user, strips the caller token, and
-  emits telemetry.
+- **Agent API** — path suffix `agent`, from [`agent-openapi.yaml`](agent-openapi.yaml),
+  policy [`policy/agent-api.xml`](policy/agent-api.xml). Validates the user token
+  (`aud=api://agent`, scope `agent.invoke`) and routes to the agent service.
+- **MCP API** — path suffix `mcp-snowflake`, from [`openapi.yaml`](openapi.yaml),
+  policy [`policy/mcp-snowflake.xml`](policy/mcp-snowflake.xml). Validates the OBO
+  token (`aud=api://mcp-snowflake`, scope `snowflake.query`) and routes to the MCP
+  server.
+- Named values: `OKTA_ISSUER`, `OKTA_AUDIENCE`, `OKTA_AGENT_AUDIENCE`,
+  `OKTA_JWKS_URI`, `MCP_BACKEND_URL`, `AGENT_BACKEND_URL`.
 
 ## Prerequisites
 
 - `az` CLI logged into the subscription that owns your APIM.
 - Your existing APIM resource group + name.
 - The Okta values from [`okta-setup.md`](okta-setup.md).
-- A reachable MCP backend URL (local tunnel for demo, or a deployed MCP server).
+- Reachable agent-service and MCP-server backend URLs (tunnel for demo, or deployed).
 
 ## Steps
 
@@ -28,26 +32,32 @@ export APIM_NAME=<your-existing-apim-name>
 
 export OKTA_ISSUER=https://example.okta.com/oauth2/aus1a2b3c4d5e6f7g8h9
 export OKTA_AUDIENCE=api://mcp-snowflake
+export OKTA_AGENT_AUDIENCE=api://agent
 export OKTA_JWKS_URI=$OKTA_ISSUER/v1/keys
 export MCP_BACKEND_URL=https://<your-mcp-server-host>/mcp
+export AGENT_BACKEND_URL=https://<your-agent-service-host>/agent
 
-# 1. Create/refresh the named values the policy references
+# 1. Create/refresh the named values both policies reference
 ./scripts/01-set-named-values.sh
 
-# 2. Import the OpenAPI as a new API named "mcp-snowflake"
-./scripts/02-import-api-into-existing-apim.sh
+# 2. Import + policy the AGENT API
+API_ID=agent API_PATH=agent SPEC=apim/agent-openapi.yaml \
+  DISPLAY="MCP Snowflake Agent" ./scripts/02-import-api-into-existing-apim.sh
+API_ID=agent POLICY=apim/policy/agent-api.xml ./scripts/03-apply-policy.sh
 
-# 3. Attach the JWT-validation + governance policy to that API
-./scripts/03-apply-policy.sh
+# 3. Import + policy the MCP API
+API_ID=mcp-snowflake API_PATH=mcp-snowflake SPEC=apim/openapi.yaml \
+  DISPLAY="MCP Snowflake Gateway" ./scripts/02-import-api-into-existing-apim.sh
+API_ID=mcp-snowflake POLICY=apim/policy/mcp-snowflake.xml ./scripts/03-apply-policy.sh
 ```
 
-## What the policy enforces (summary)
+## What the policies enforce (summary)
 
-1. **`validate-jwt`** against Okta's OIDC metadata/JWKS — rejects missing, expired,
-   wrong-issuer, wrong-audience, or unsigned tokens with **401** before any backend
-   call.
-2. **`required-claims`** — the token must carry scope `snowflake.query` in `scp`.
-3. **`rate-limit-by-key`** keyed on the Okta `sub` — 60 req/min/user.
+Both policies run `validate-jwt` against Okta's OIDC metadata/JWKS and reject
+missing/expired/wrong-issuer/wrong-audience/unsigned tokens with **401** before any
+backend call. The Agent API requires `aud=api://agent` + scope `agent.invoke`; the
+MCP API requires `aud=api://mcp-snowflake` + scope `snowflake.query` (the audience the
+agent's OBO exchange mints).
 4. **Token stripping** — the caller's Okta bearer is deleted before forwarding; APIM
    authenticates to the backend via managed identity (preferred) so the user token
    never reaches the backend.

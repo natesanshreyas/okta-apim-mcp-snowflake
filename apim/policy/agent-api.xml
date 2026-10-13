@@ -1,0 +1,99 @@
+<!--
+  APIM inbound/outbound policy for the Agent API (Pattern B front door).
+
+  Front:  Okta OAuth2/OIDC JWT from the chat client (Auth Code + PKCE)
+          audience = api://agent, scope = agent.invoke
+  Back:   Agent service (orchestrator) that wraps the Azure OpenAI model and,
+          per tool call, performs OBO token exchange and calls the MCP API.
+
+  This is the FIRST of two protected APIs on your existing APIM instance.
+  The SECOND is apim/policy/mcp-snowflake.xml (the MCP tool API).
+
+  Named Values expected (see scripts/01-set-named-values.sh):
+    OKTA_ISSUER         https://<org>.okta.com/oauth2/<authz-server-id>
+    OKTA_AGENT_AUDIENCE api://agent
+    AGENT_BACKEND_URL   https://<agent-service-host>/agent
+-->
+<policies>
+    <inbound>
+        <base />
+
+        <cors allow-credentials="false">
+            <allowed-origins><origin>*</origin></allowed-origins>
+            <allowed-methods>
+                <method>GET</method>
+                <method>POST</method>
+                <method>OPTIONS</method>
+            </allowed-methods>
+            <allowed-headers><header>*</header></allowed-headers>
+        </cors>
+
+        <!-- 1. Validate the Okta user token for the AGENT audience. -->
+        <validate-jwt header-name="Authorization"
+                      failed-validation-httpcode="401"
+                      failed-validation-error-message="Unauthorized: invalid or missing Okta access token for the agent API"
+                      require-scheme="Bearer"
+                      require-expiration-time="true"
+                      require-signed-tokens="true"
+                      output-token-variable-name="jwt">
+            <openid-config url="{{OKTA_ISSUER}}/.well-known/openid-configuration" />
+            <issuers>
+                <issuer>{{OKTA_ISSUER}}</issuer>
+            </issuers>
+            <audiences>
+                <audience>{{OKTA_AGENT_AUDIENCE}}</audience>
+            </audiences>
+            <required-claims>
+                <claim name="scp" match="any">
+                    <value>agent.invoke</value>
+                </claim>
+            </required-claims>
+        </validate-jwt>
+
+        <set-variable name="user-sub"
+                      value="@(((Jwt)context.Variables[&quot;jwt&quot;]).Claims.GetValueOrDefault(&quot;sub&quot;, &quot;anon&quot;))" />
+        <set-variable name="user-email"
+                      value="@(((Jwt)context.Variables[&quot;jwt&quot;]).Claims.GetValueOrDefault(&quot;email&quot;, (((Jwt)context.Variables[&quot;jwt&quot;]).Claims.GetValueOrDefault(&quot;sub&quot;, &quot;unknown&quot;))))" />
+
+        <!-- 2. Per-user rate limit at the front door. -->
+        <rate-limit-by-key calls="30" renewal-period="60"
+                           counter-key="@((string)context.Variables[&quot;user-sub&quot;])" />
+
+        <!-- 3. Route to the agent service.
+                NOTE: unlike the MCP hop, we DO forward the user's token here,
+                because the agent service needs it as the subject_token for the
+                OBO exchange that mints the downstream MCP token. The agent is a
+                confidential client and is a trusted first-party backend. -->
+        <set-backend-service base-url="{{AGENT_BACKEND_URL}}" />
+        <set-header name="X-Auth-Subject" exists-action="override">
+            <value>@((string)context.Variables["user-sub"])</value>
+        </set-header>
+        <set-header name="X-Auth-Email" exists-action="override">
+            <value>@((string)context.Variables["user-email"])</value>
+        </set-header>
+        <set-header name="X-Request-Id" exists-action="override">
+            <value>@(context.RequestId.ToString())</value>
+        </set-header>
+
+        <trace source="agent-api" severity="information">
+            <message>@("Agent request from " + (string)context.Variables["user-email"])</message>
+            <metadata name="user-sub"   value="@((string)context.Variables[&quot;user-sub&quot;])" />
+            <metadata name="user-email" value="@((string)context.Variables[&quot;user-email&quot;])" />
+            <metadata name="request-id" value="@(context.RequestId.ToString())" />
+        </trace>
+    </inbound>
+
+    <backend><base /></backend>
+
+    <outbound>
+        <base />
+        <trace source="agent-api" severity="information">
+            <message>@("Agent response " + context.Response.StatusCode + " for " + (string)context.Variables["user-email"])</message>
+            <metadata name="user-sub"    value="@((string)context.Variables[&quot;user-sub&quot;])" />
+            <metadata name="status-code" value="@(context.Response.StatusCode.ToString())" />
+            <metadata name="elapsed-ms"  value="@(context.Elapsed.TotalMilliseconds.ToString())" />
+        </trace>
+    </outbound>
+
+    <on-error><base /></on-error>
+</policies>

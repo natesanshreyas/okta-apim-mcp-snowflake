@@ -120,3 +120,78 @@ Those are exactly the checks the APIM `validate-jwt` policy performs.
 
 No client secret and no API key are stored on the device — authentication is
 entirely via the short-lived Okta access token.
+
+---
+
+## 6. Pattern B additions — Agent audience, agent.invoke scope, and OBO
+
+Pattern B (the Azure model is the agent) needs a **second audience/scope** and a
+**confidential client** that can perform On-Behalf-Of (OBO) token exchange.
+
+### 6a. Add the agent audience + scope
+
+On the same `mcp-snowflake` authorization server (or a dedicated one):
+
+- The user token the chat client requests should target audience **`api://agent`**.
+  In Okta, the `aud` of an access token is the authorization server's **Audience**
+  value. If you want distinct audiences for the two hops, create **two custom
+  authorization servers** — one with audience `api://agent`, one with
+  `api://mcp-snowflake` — or use a single server and validate the server's audience
+  in both APIM policies. The repo assumes two audiences; adjust `OKTA_AGENT_AUDIENCE`
+  / `OKTA_AUDIENCE` to match your choice.
+- Add a scope **`agent.invoke`** (Display: "Invoke the Snowflake agent"). The chat
+  client requests `openid profile email agent.invoke`.
+
+### 6b. Create the CONFIDENTIAL agent client
+
+Admin Console → **Applications → Create App Integration**
+
+- Sign-in method: **OIDC - OpenID Connect**
+- Application type: **Web Application** (confidential; has a client secret)
+- App name: `MCP Snowflake Agent (confidential)`
+- Grant types: enable **Token Exchange** (OBO). If your Okta edition exposes it as
+  "Token Exchange" under the app's grant types, enable it; otherwise use the
+  authorization server **Access Policy** to permit the token-exchange grant for this
+  client.
+
+Note its **Client ID** → `OKTA_AGENT_CLIENT_ID` and **Client Secret** →
+`OKTA_AGENT_CLIENT_SECRET` (store in Key Vault; never commit).
+
+### 6c. Allow the OBO exchange in an access policy
+
+On the authorization server that issues `api://mcp-snowflake` tokens →
+**Access Policies** → add/extend a policy assigned to the agent confidential client →
+**Add Rule**:
+
+- Grant type: **Token Exchange** (`urn:ietf:params:oauth:grant-type:token-exchange`)
+- Scopes: `snowflake.query`
+- Conditions: the subject (user) must already hold a valid token for `api://agent`.
+
+### 6d. What the agent does at runtime
+
+For each tool call, [`llm-agent/obo.py`](../llm-agent/obo.py) POSTs to
+`{OKTA_ISSUER}/v1/token`:
+
+```
+grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+subject_token=<the user's api://agent access token>
+subject_token_type=urn:ietf:params:oauth:token-type:access_token
+requested_token_type=urn:ietf:params:oauth:token-type:access_token
+audience=api://mcp-snowflake
+scope=snowflake.query
+```
+authenticated as the confidential agent client (client_id + secret). Okta returns a
+new access token whose `aud=api://mcp-snowflake`, `scp=[snowflake.query]`, and whose
+`sub`/`email` are still the **original user** — which is exactly what the APIM MCP
+policy validates and what gets tagged onto Snowflake queries for per-user audit.
+
+### Pattern B values summary
+
+| Variable | Example | Used by |
+|---|---|---|
+| `OKTA_AGENT_AUDIENCE` | `api://agent` | Agent API APIM policy |
+| `OKTA_CLIENT_ID` (public/PKCE) | `0oaPUBLIC...` | chat client |
+| `OKTA_AGENT_CLIENT_ID` (confidential) | `0oaCONF...` | agent service (OBO) |
+| `OKTA_AGENT_CLIENT_SECRET` | *(Key Vault)* | agent service (OBO) |
+| scope `agent.invoke` | — | chat client → Agent API |
+| scope `snowflake.query` | — | OBO token → MCP API |

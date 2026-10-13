@@ -1,0 +1,76 @@
+openapi: 3.0.3
+info:
+  title: MCP Snowflake Agent API
+  version: "1.0.0"
+  description: >
+    Front-door Agent API (Pattern B). The enterprise's Azure-hosted model is the
+    agent: it receives a natural-language question, selects Snowflake MCP tools,
+    performs OBO token exchange, and calls the MCP API. Authentication is via Okta
+    OAuth2/OIDC access tokens with audience api://agent and scope agent.invoke.
+    Imported as a NEW API into an EXISTING APIM instance; the policy lives in
+    apim/policy/agent-api.xml.
+
+servers:
+  - url: https://REPLACE-WITH-YOUR-APIM-GATEWAY-HOST/agent
+    description: APIM gateway base URL for the agent API
+
+security:
+  - oktaOAuth: [agent.invoke]
+
+paths:
+  /chat:
+    post:
+      operationId: agentChat
+      summary: Ask the agent a question (it decides which Snowflake tools to call)
+      security:
+        - oktaOAuth: [agent.invoke]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                question:
+                  type: string
+                  example: Which region has the most customers?
+              required: [question]
+      responses:
+        "200":
+          description: The agent's natural-language answer.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  answer:
+                    type: string
+        "401":
+          description: Missing/invalid Okta token or missing agent.invoke scope.
+        "429":
+          description: Per-user rate limit exceeded.
+  /health:
+    get:
+      operationId: agentHealth
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: OK
+
+components:
+  securitySchemes:
+    oktaOAuth:
+      type: oauth2
+      description: >
+        Okta OAuth2 / OIDC. The chat client performs Authorization Code + PKCE and
+        sends the resulting access token (audience api://agent) as a Bearer token.
+      flows:
+        authorizationCode:
+          authorizationUrl: https://REPLACE.okta.com/oauth2/REPLACE-AUTHZ-SERVER/v1/authorize
+          tokenUrl: https://REPLACE.okta.com/oauth2/REPLACE-AUTHZ-SERVER/v1/token
+          scopes:
+            agent.invoke: Invoke the Snowflake agent
+            openid: OIDC sign-in
+            profile: Basic profile
+            email: User email claim
