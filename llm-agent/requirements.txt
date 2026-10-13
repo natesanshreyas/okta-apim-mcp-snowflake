@@ -1,0 +1,5 @@
+# Azure-hosted LLM agent that drives the MCP Snowflake tool
+openai>=1.40.0
+mcp>=1.2,<2
+# Optional: AAD auth to Azure OpenAI instead of an API key
+azure-identity>=1.17.0

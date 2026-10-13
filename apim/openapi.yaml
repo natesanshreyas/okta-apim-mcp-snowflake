@@ -1,0 +1,105 @@
+openapi: 3.0.3
+info:
+  title: MCP Snowflake Gateway
+  version: "1.0.0"
+  description: >
+    MCP (Model Context Protocol) endpoint exposing Snowflake query capabilities,
+    fronted by Azure API Management. Authentication is via Okta OAuth2/OIDC access
+    tokens (Bearer JWT). This API is imported as a NEW API into an EXISTING APIM
+    instance; the JWT-validation + governance policy lives in
+    apim/policy/mcp-snowflake.xml.
+
+    MCP uses the Streamable HTTP transport: a single POST endpoint carries
+    JSON-RPC 2.0 messages (initialize, tools/list, tools/call) and the server may
+    respond with JSON or an SSE stream. APIM simply proxies this path; all MCP
+    semantics are handled by the backend MCP server.
+
+servers:
+  - url: https://REPLACE-WITH-YOUR-APIM-GATEWAY-HOST/mcp-snowflake
+    description: APIM gateway base URL for this API (path suffix set at import time)
+
+security:
+  - oktaOAuth: [snowflake.query]
+
+paths:
+  /mcp:
+    post:
+      operationId: mcpStreamableHttp
+      summary: MCP Streamable HTTP endpoint (JSON-RPC 2.0)
+      description: >
+        Carries all MCP JSON-RPC messages (initialize, tools/list, tools/call).
+        The caller MUST present a valid Okta access token with the
+        `snowflake.query` scope. APIM validates the JWT before proxying to the
+        backend MCP server.
+      security:
+        - oktaOAuth: [snowflake.query]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: A JSON-RPC 2.0 request envelope.
+              properties:
+                jsonrpc:
+                  type: string
+                  example: "2.0"
+                id:
+                  oneOf:
+                    - type: string
+                    - type: integer
+                method:
+                  type: string
+                  example: tools/call
+                params:
+                  type: object
+              required: [jsonrpc, method]
+      responses:
+        "200":
+          description: JSON-RPC result (JSON body or SSE stream).
+          content:
+            application/json:
+              schema:
+                type: object
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          description: Missing/invalid/expired Okta token, or missing required scope.
+        "429":
+          description: Per-user rate limit exceeded.
+    get:
+      operationId: mcpSseStream
+      summary: Optional SSE stream channel for MCP Streamable HTTP
+      description: >
+        Some MCP clients open a GET to receive server-initiated SSE events.
+        Same Okta bearer auth applies.
+      security:
+        - oktaOAuth: [snowflake.query]
+      responses:
+        "200":
+          description: SSE event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          description: Missing/invalid/expired Okta token.
+
+components:
+  securitySchemes:
+    oktaOAuth:
+      type: oauth2
+      description: >
+        Okta OAuth2 / OIDC. Claude Desktop performs Authorization Code + PKCE and
+        sends the resulting access token as a Bearer token. Replace the URLs with
+        your Okta custom authorization server endpoints.
+      flows:
+        authorizationCode:
+          authorizationUrl: https://REPLACE.okta.com/oauth2/REPLACE-AUTHZ-SERVER/v1/authorize
+          tokenUrl: https://REPLACE.okta.com/oauth2/REPLACE-AUTHZ-SERVER/v1/token
+          scopes:
+            snowflake.query: Query Snowflake through the MCP tool
+            openid: OIDC sign-in
+            profile: Basic profile
+            email: User email claim

@@ -1,0 +1,129 @@
+<!--
+  APIM inbound/outbound policy for the Okta-protected MCP→Snowflake gateway.
+
+  Front:  Okta OAuth2/OIDC JWT (Auth Code + PKCE, obtained by Claude Desktop)
+  Back:   MCP server (Streamable HTTP) exposing Snowflake tools
+  Side:   Per-user telemetry to Application Insights
+
+  This policy is attached to a NEW API on your EXISTING APIM instance.
+  No API keys are used; the caller presents an Okta access token (Bearer JWT),
+  APIM validates it against Okta's JWKS, then authenticates to the backend via
+  managed identity (preferred) or an injected named value.
+
+  Named Values expected on the APIM instance (see scripts/01-set-named-values.sh):
+    OKTA_ISSUER       e.g. https://example.okta.com/oauth2/aus1a2b3c4d5e6f7g8h9
+    OKTA_AUDIENCE     the API audience, e.g. api://mcp-snowflake
+    OKTA_JWKS_URI     e.g. https://example.okta.com/oauth2/aus.../v1/keys
+    MCP_BACKEND_URL   e.g. https://mcp.internal.example.com/mcp
+-->
+<policies>
+    <inbound>
+        <base />
+
+        <!-- 1. CORS so a browser-based OAuth helper / Claude Desktop can preflight -->
+        <cors allow-credentials="false">
+            <allowed-origins>
+                <origin>*</origin>
+            </allowed-origins>
+            <allowed-methods>
+                <method>GET</method>
+                <method>POST</method>
+                <method>OPTIONS</method>
+            </allowed-methods>
+            <allowed-headers>
+                <header>*</header>
+            </allowed-headers>
+        </cors>
+
+        <!-- 2. Validate the Okta access token BEFORE any backend is reached.
+                Rejects missing/invalid/expired tokens with 401. -->
+        <validate-jwt header-name="Authorization"
+                      failed-validation-httpcode="401"
+                      failed-validation-error-message="Unauthorized: invalid or missing Okta access token"
+                      require-scheme="Bearer"
+                      require-expiration-time="true"
+                      require-signed-tokens="true"
+                      output-token-variable-name="jwt">
+            <!-- Okta exposes OIDC metadata; APIM fetches JWKS from here and caches it -->
+            <openid-config url="{{OKTA_ISSUER}}/.well-known/openid-configuration" />
+            <issuers>
+                <issuer>{{OKTA_ISSUER}}</issuer>
+            </issuers>
+            <audiences>
+                <audience>{{OKTA_AUDIENCE}}</audience>
+            </audiences>
+            <!-- Require the Snowflake access scope minted by Okta's authz server.
+                 Okta puts granted scopes in the "scp" claim (array). -->
+            <required-claims>
+                <claim name="scp" match="any">
+                    <value>snowflake.query</value>
+                </claim>
+            </required-claims>
+        </validate-jwt>
+
+        <!-- 3. Capture caller identity from validated token for governance/telemetry -->
+        <set-variable name="user-sub"
+                      value="@(((Jwt)context.Variables[&quot;jwt&quot;]).Claims.GetValueOrDefault(&quot;sub&quot;, &quot;anon&quot;))" />
+        <set-variable name="user-email"
+                      value="@(((Jwt)context.Variables[&quot;jwt&quot;]).Claims.GetValueOrDefault(&quot;email&quot;, (((Jwt)context.Variables[&quot;jwt&quot;]).Claims.GetValueOrDefault(&quot;sub&quot;, &quot;unknown&quot;))))" />
+
+        <!-- 4. Per-user rate limit keyed on Okta subject (prevents one user exhausting backend) -->
+        <rate-limit-by-key calls="60"
+                           renewal-period="60"
+                           counter-key="@((string)context.Variables[&quot;user-sub&quot;])" />
+
+        <!-- 5. Route to the MCP server backend -->
+        <set-backend-service base-url="{{MCP_BACKEND_URL}}" />
+
+        <!-- 6. Strip the caller's Okta bearer before forwarding.
+                APIM authenticates to the backend with its managed identity.
+                If your MCP backend is an Azure resource (Container App / App Service)
+                protected by Entra, uncomment authentication-managed-identity and set
+                the resource to the backend app's application ID URI. For a backend that
+                trusts the network boundary, a shared named value header can be used
+                instead — but NEVER forward the user's Okta token to the backend. -->
+        <set-header name="Authorization" exists-action="delete" />
+        <!-- <authentication-managed-identity resource="api://<mcp-backend-app-id>" /> -->
+
+        <!-- 7. Forward governance context to the backend (identity, correlation) -->
+        <set-header name="X-Auth-Subject" exists-action="override">
+            <value>@((string)context.Variables["user-sub"])</value>
+        </set-header>
+        <set-header name="X-Auth-Email" exists-action="override">
+            <value>@((string)context.Variables["user-email"])</value>
+        </set-header>
+        <set-header name="X-Request-Id" exists-action="override">
+            <value>@(context.RequestId.ToString())</value>
+        </set-header>
+
+        <!-- 8. Inbound trace: who called what -->
+        <trace source="mcp-snowflake" severity="information">
+            <message>@("Authenticated MCP request from " + (string)context.Variables["user-email"])</message>
+            <metadata name="user-sub"   value="@((string)context.Variables[&quot;user-sub&quot;])" />
+            <metadata name="user-email" value="@((string)context.Variables[&quot;user-email&quot;])" />
+            <metadata name="operation"  value="@(context.Request.Method + &quot; &quot; + context.Request.Url.Path)" />
+            <metadata name="request-id" value="@(context.RequestId.ToString())" />
+        </trace>
+    </inbound>
+
+    <backend>
+        <base />
+    </backend>
+
+    <outbound>
+        <base />
+
+        <!-- 9. Outbound trace: status + latency per user for FinOps/governance KQL -->
+        <trace source="mcp-snowflake" severity="information">
+            <message>@("Response " + context.Response.StatusCode + " for " + (string)context.Variables["user-email"])</message>
+            <metadata name="user-sub"    value="@((string)context.Variables[&quot;user-sub&quot;])" />
+            <metadata name="user-email"  value="@((string)context.Variables[&quot;user-email&quot;])" />
+            <metadata name="status-code" value="@(context.Response.StatusCode.ToString())" />
+            <metadata name="elapsed-ms"  value="@(context.Elapsed.TotalMilliseconds.ToString())" />
+        </trace>
+    </outbound>
+
+    <on-error>
+        <base />
+    </on-error>
+</policies>

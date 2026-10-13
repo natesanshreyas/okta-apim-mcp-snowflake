@@ -1,0 +1,23 @@
+# Secrets / local env
+.env
+*.env
+!.env.example
+*.p8
+*.pem
+*.key
+secrets/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# APIM parameter files that may contain real IDs
+apim/parameters.json

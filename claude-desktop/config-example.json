@@ -1,0 +1,36 @@
+{
+  "_comment": "Claude Desktop MCP server configuration for the Okta-protected APIM gateway. Copy to your per-OS Claude Desktop config path (see docs/claude-desktop-setup.md) and replace every <PLACEHOLDER>. Two options are shown: (A) a remote MCP server reached directly by Claude Desktop with OAuth, and (B) a local stdio bridge (mcp-remote) that performs the Okta OAuth flow and forwards to the APIM HTTPS endpoint. Use (B) if your Claude Desktop build does not yet support remote OAuth MCP servers natively. The exact schema evolves; verify against current Anthropic docs before fleet rollout.",
+
+  "mcpServers": {
+    "snowflake-via-apim": {
+      "_comment_optionA": "OPTION A — native remote MCP server with OAuth (newer Claude Desktop). Claude Desktop runs the Okta Authorization Code + PKCE flow in a browser, caches the access token, and attaches it as a Bearer token to the APIM MCP endpoint.",
+      "url": "https://<YOUR_APIM_GATEWAY_HOST>/mcp-snowflake/mcp",
+      "transport": "http",
+      "oauth": {
+        "issuer": "https://<YOUR_OKTA_DOMAIN>/oauth2/<YOUR_AUTHZ_SERVER_ID>",
+        "authorizationUrl": "https://<YOUR_OKTA_DOMAIN>/oauth2/<YOUR_AUTHZ_SERVER_ID>/v1/authorize",
+        "tokenUrl": "https://<YOUR_OKTA_DOMAIN>/oauth2/<YOUR_AUTHZ_SERVER_ID>/v1/token",
+        "clientId": "<YOUR_OKTA_PUBLIC_CLIENT_ID>",
+        "scopes": ["openid", "profile", "email", "snowflake.query"],
+        "usePkce": true,
+        "redirectUri": "http://localhost:53682/callback"
+      }
+    },
+
+    "snowflake-via-apim-bridge": {
+      "_comment_optionB": "OPTION B — local stdio bridge using mcp-remote, which performs the Okta OAuth flow and proxies to the remote APIM HTTPS MCP endpoint. Use this if your Claude Desktop does not natively support remote OAuth MCP servers. Requires Node.js.",
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://<YOUR_APIM_GATEWAY_HOST>/mcp-snowflake/mcp",
+        "--oauth-server",
+        "https://<YOUR_OKTA_DOMAIN>/oauth2/<YOUR_AUTHZ_SERVER_ID>",
+        "--client-id",
+        "<YOUR_OKTA_PUBLIC_CLIENT_ID>",
+        "--scope",
+        "openid profile email snowflake.query"
+      ]
+    }
+  }
+}
